@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>QUBIC 3D — Spatial Tic-Tac-Toe</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Ambient Background Canvas for Spatial Particles & Celebrations -->
+  <canvas id="fx-canvas" aria-hidden="true"></canvas>
+
+  <!-- Ambient Glow Orbs -->
+  <div class="ambient-glow glow-cyan" aria-hidden="true"></div>
+  <div class="ambient-glow glow-rose" aria-hidden="true"></div>
+
+  <div class="app-shell">
+    <!-- TOP NAVIGATION / HEADER BAR -->
+    <header class="topbar glass-panel">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">
+          <span class="cube-icon"></span>
+        </div>
+        <div class="brand-text">
+          <h1>QUBIC <span class="accent-badge">3D</span></h1>
+          <p class="subtitle">Spatial 3×3×3 Strategy</p>
+        </div>
+      </div>
+
+      <!-- SCOREBOARD & ACTIVE TURN PILL -->
+      <div class="scoreboard" role="region" aria-label="Scoreboard">
+        <div class="score-card player-x active-turn" id="score-card-x">
+          <div class="player-indicator">
+            <span class="symbol-x">✕</span>
+            <div class="player-meta">
+              <span class="player-name" id="label-player-x">PLAYER X</span>
+              <span class="turn-tag" id="turn-tag-x">YOUR TURN</span>
+            </div>
+          </div>
+          <span class="score-value" id="score-x">0</span>
+        </div>
+
+        <div class="score-divider">
+          <span class="draws-label">DRAWS</span>
+          <span class="draws-value" id="score-draws">0</span>
+        </div>
+
+        <div class="score-card player-o" id="score-card-o">
+          <span class="score-value" id="score-o">0</span>
+          <div class="player-indicator right">
+            <div class="player-meta">
+              <span class="player-name" id="label-player-o">AI (HARD)</span>
+              <span class="turn-tag" id="turn-tag-o">WAITING</span>
+            </div>
+            <span class="symbol-o">◯</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- HEADER QUICK ACTIONS -->
+      <div class="header-actions">
+        <button class="icon-btn" id="btn-sound" title="Toggle Sound Effects (M)" aria-label="Toggle Sound Effects">
+          <svg id="icon-sound-on" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <path d="M15.54 8.46a5 5 0 0 1 0 7.07"></path>
+            <path d="M19.07 4.93a10 10 0 0 1 0 14.14"></path>
+          </svg>
+          <svg id="icon-sound-off" class="hidden" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"></polygon>
+            <line x1="23" y1="9" x2="17" y2="15"></line>
+            <line x1="17" y1="9" x2="23" y2="15"></line>
+          </svg>
+        </button>
+        <button class="icon-btn" id="btn-rules" title="How to Play & 49 Winning Lines (?)" aria-label="How to Play">
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"></path>
+            <line x1="12" y1="17" x2="12.01" y2="17"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- MAIN WORKSPACE -->
+    <main class="workspace">
+      <!-- LEFT PANEL: GAME SETTINGS, CONTROLS & MOVE HISTORY -->
+      <aside class="side-panel left-panel glass-panel">
+        <div class="panel-section">
+          <h2 class="section-title">Game Mode</h2>
+          <div class="segmented-control" role="radiogroup" aria-label="Opponent Mode">
+            <button class="seg-btn active" data-mode="ai" id="mode-ai">vs AI</button>
+            <button class="seg-btn" data-mode="pvp" id="mode-pvp">2 Players</button>
+          </div>
+
+          <div class="sub-control" id="ai-difficulty-group">
+            <label class="control-label">AI Difficulty</label>
+            <div class="segmented-control compact" role="radiogroup" aria-label="AI Difficulty">
+              <button class="seg-btn" data-diff="easy">Casual</button>
+              <button class="seg-btn" data-diff="medium">Tactical</button>
+              <button class="seg-btn active" data-diff="hard">Grandmaster</button>
+            </div>
+          </div>
+
+          <div class="sub-control">
+            <label class="control-label">Grid Dimension</label>
+            <div class="segmented-control compact" role="radiogroup" aria-label="Grid Dimension">
+              <button class="seg-btn active" data-grid="3d" id="grid-3d">3×3×3 Cube (49 Lines)</button>
+              <button class="seg-btn" data-grid="classic" id="grid-classic">3×3 Classic</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- SPATIAL VIEW CONTROLS -->
+        <div class="panel-section">
+          <div class="section-header-row">
+            <h2 class="section-title">Spatial Controls</h2>
+            <button class="text-btn" id="btn-reset-cam" title="Reset 3D Camera Angle (R)">Reset View</button>
+          </div>
+
+          <div class="slider-group" id="explode-slider-group">
+            <div class="slider-header">
+              <label for="slider-explode">Layer Separation</label>
+              <span class="mono-badge" id="explode-val">100%</span>
+            </div>
+            <input type="range" id="slider-explode" min="55" max="165" value="100" />
+          </div>
+
+          <div class="layer-filter-group" id="layer-filter-group">
+            <label class="control-label">Isolate Layer <span class="key-hint">[0-3]</span></label>
+            <div class="layer-pills">
+              <button class="layer-pill active" data-layer="all">All</button>
+              <button class="layer-pill" data-layer="0">Top (L1)</button>
+              <button class="layer-pill" data-layer="1">Mid (L2)</button>
+              <button class="layer-pill" data-layer="2">Bot (L3)</button>
+            </div>
+          </div>
+
+          <div class="toggle-row">
+            <label for="toggle-xray" class="toggle-label">
+              <span>Threat &amp; Line Radar</span>
+              <small>Preview intersecting win lines on hover</small>
+            </label>
+            <input type="checkbox" id="toggle-xray" class="switch-input" checked />
+          </div>
+
+          <div class="toggle-row">
+            <label for="toggle-autorotate" class="toggle-label">
+              <span>Auto-Orbit Cube</span>
+              <small>Gentle continuous rotation</small>
+            </label>
+            <input type="checkbox" id="toggle-autorotate" class="switch-input" />
+          </div>
+        </div>
+
+        <!-- TACTICAL ACTIONS -->
+        <div class="panel-section actions-section">
+          <div class="action-row">
+            <button class="btn btn-secondary" id="btn-undo" disabled title="Undo Move (Z)">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M3 7v6h6"></path>
+                <path d="M21 17a9 9 0 0 0-9-9 9 9 0 0 0-6 2.3L3 13"></path>
+              </svg>
+              Undo
+            </button>
+            <button class="btn btn-accent" id="btn-hint" title="Ask AI for Tactical Hint (H)">
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M9 18h6"></path>
+                <path d="M10 22h4"></path>
+                <path d="M12 2a7 7 0 0 0-4 12.7V17h8v-2.3A7 7 0 0 0 12 2z"></path>
+              </svg>
+              Hint
+            </button>
+          </div>
+          <button class="btn btn-primary full-width" id="btn-new-game">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.2">
+              <polyline points="23 4 23 10 17 10"></polyline>
+              <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+            </svg>
+            New Game
+          </button>
+        </div>
+
+        <!-- MOVE LOG -->
+        <div class="panel-section history-section">
+          <div class="section-header-row">
+            <h2 class="section-title">Move Log</h2>
+            <span class="mono-badge" id="move-counter">0 / 27</span>
+          </div>
+          <div class="move-list" id="move-list" aria-live="polite">
+            <div class="empty-history">Click any cell in the 3D cube or 2D slices to begin.</div>
+          </div>
+        </div>
+      </aside>
+
+      <!-- CENTER STAGE: INTERACTIVE 3D VIEWPORT -->
+      <section class="viewport-stage" id="viewport-stage" aria-label="Interactive 3D Game Board">
+        <!-- STATUS / NOTIFICATION BANNER -->
+        <div class="hud-top">
+          <div class="status-banner glass-pill" id="status-banner">
+            <span class="status-dot" id="status-dot"></span>
+            <span id="status-text">Your turn — Select any cell in 3D space</span>
+          </div>
+          <div class="coord-readout glass-pill" id="coord-readout">
+            <span class="coord-label">TARGET</span>
+            <span class="coord-value" id="coord-value">—</span>
+          </div>
+        </div>
+
+        <!-- 3D SCENE CONTAINER -->
+        <div class="scene-container" id="scene-container">
+          <div class="scene-3d" id="scene-3d">
+            <!-- Vertical Guide Pillars connecting the 3 layers -->
+            <div class="pillars-group" id="pillars-group"></div>
+            <!-- Center Nexus Core Indicator -->
+            <div class="nexus-core" id="nexus-core"></div>
+            <!-- 3D Layers injected dynamically by JS -->
+            <div class="layers-group" id="layers-group"></div>
+            <!-- 3D Winning Laser Beams injected dynamically -->
+            <div class="beams-group" id="beams-group"></div>
+          </div>
+        </div>
+
+        <!-- CAMERA PRESET FLOATING DOCK -->
+        <div class="hud-bottom">
+          <div class="camera-dock glass-pill" role="toolbar" aria-label="Camera Presets">
+            <button class="cam-btn active" data-cam="iso" title="Isometric 3D View">Iso</button>
+            <button class="cam-btn" data-cam="top" title="Top-Down Overhead View">Top</button>
+            <button class="cam-btn" data-cam="front" title="Front Elevation View">Front</button>
+            <button class="cam-btn" data-cam="side" title="Side Profile View">Side</button>
+            <span class="dock-sep"></span>
+            <span class="drag-hint">Drag to Orbit · Scroll to Zoom</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- RIGHT PANEL: SYNCHRONIZED 2D LAYER SLICES & TACTICAL TELEMETRY -->
+      <aside class="side-panel right-panel glass-panel" aria-label="2D Layer Slices">
+        <div class="panel-section">
+          <div class="section-header-row">
+            <h2 class="section-title">Tactical Slices</h2>
+            <span class="slice-subtitle">2D Sync View</span>
+          </div>
+          <p class="helper-caption">Click or hover here for unobstructed access to interior cells.</p>
+
+          <div class="slices-container" id="slices-container">
+            <!-- Populated by JS: Layer 1 (Top), Layer 2 (Middle), Layer 3 (Bottom) -->
+          </div>
+        </div>
+
+        <!-- LIVE TELEMETRY / RADAR BOX -->
+        <div class="panel-section telemetry-section">
+          <h2 class="section-title">Spatial Telemetry</h2>
+          <div class="telemetry-card" id="telemetry-card">
+            <div class="telemetry-row">
+              <span class="tel-label">Active Win Lines</span>
+              <span class="tel-val" id="tel-total-lines">49</span>
+            </div>
+            <div class="telemetry-row">
+              <span class="tel-label">Cell Line Power</span>
+              <span class="tel-val highlight" id="tel-cell-power">Hover a cell</span>
+            </div>
+            <div class="telemetry-row">
+              <span class="tel-label">Immediate Threats</span>
+              <span class="tel-val" id="tel-threats">None detected</span>
+            </div>
+            <div class="tactical-note" id="tactical-note">
+              Pro Tip: The center cell <strong>(L2·R2·C2)</strong> intersects <strong>13 winning lines</strong>—more than any other position in the cube.
+            </div>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </div>
+
+  <!-- HOW TO PLAY / RULES MODAL -->
+  <div class="modal-backdrop hidden" id="rules-modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-card glass-panel">
+      <div class="modal-header">
+        <div>
+          <h2 id="modal-title">How to Play 3D Tic-Tac-Toe (Qubic)</h2>
+          <p class="modal-subtitle">Master all 49 spatial winning alignments across 3 dimensions</p>
+        </div>
+        <button class="icon-btn" id="btn-close-modal" aria-label="Close Modal">✕</button>
+      </div>
+
+      <div class="modal-body">
+        <div class="rule-grid">
+          <div class="rule-box">
+            <div class="rule-badge">18</div>
+            <h3>Single-Layer Lines</h3>
+            <p>Just like classic Tic-Tac-Toe on each of the 3 horizontal boards: <strong>9 rows</strong> and <strong>9 columns</strong> + <strong>6 flat diagonals</strong> (24 total within single layers).</p>
+          </div>
+          <div class="rule-box">
+            <div class="rule-badge">9</div>
+            <h3>Vertical Pillars</h3>
+            <p>Stack 3 marks directly above one another in the exact same row &amp; column across <strong>Top, Middle, and Bottom</strong> layers.</p>
+          </div>
+          <div class="rule-box">
+            <div class="rule-badge">12</div>
+            <h3>Staircase Diagonals</h3>
+            <p>Form a diagonal step-by-step across layers along either a constant row (XZ plane) or a constant column (YZ plane).</p>
+          </div>
+          <div class="rule-box accent">
+            <div class="rule-badge">4</div>
+            <h3>3D Space Diagonals</h3>
+            <p>The ultimate 3D move: connect a corner on the Top Layer through the <strong>exact Center Nexus (L2·R2·C2)</strong> to the opposite corner on the Bottom Layer.</p>
+          </div>
+        </div>
+
+        <div class="shortcuts-bar">
+          <span><kbd>Drag</kbd> Orbit 3D Cube</span>
+          <span><kbd>Scroll</kbd> Zoom</span>
+          <span><kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> Isolate Layer</span>
+          <span><kbd>0</kbd> Show All</span>
+          <span><kbd>H</kbd> AI Hint</span>
+          <span><kbd>Z</kbd> Undo</span>
+          <span><kbd>R</kbd> Reset View</span>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn btn-primary" id="btn-got-it">Got It, Let's Play</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>
