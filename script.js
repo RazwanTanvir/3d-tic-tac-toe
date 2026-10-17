@@ -231,10 +231,90 @@
   const POWER_3D = computeCellPower(ALL_3D_LINES);
   const POWER_CLASSIC = computeCellPower(CLASSIC_LINES);
 
+  // Precompute all 15 planes of the 3x3x3 cube (each plane has 9 cells and 8 win lines)
+  // Controlling 3+ unblocked cells in a single plane is the primary geometric setup for forks.
+  function buildPlanes3D() {
+    const planes = [];
+    // 3 Horizontal layers (l = 0,1,2)
+    for (let l = 0; l < 3; l++) {
+      const cells = [];
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) cells.push(idxOf(l, r, c));
+      planes.push(cells);
+    }
+    // 3 Row slices (r = 0,1,2)
+    for (let r = 0; r < 3; r++) {
+      const cells = [];
+      for (let l = 0; l < 3; l++) for (let c = 0; c < 3; c++) cells.push(idxOf(l, r, c));
+      planes.push(cells);
+    }
+    // 3 Column slices (c = 0,1,2)
+    for (let c = 0; c < 3; c++) {
+      const cells = [];
+      for (let l = 0; l < 3; l++) for (let r = 0; r < 3; r++) cells.push(idxOf(l, r, c));
+      planes.push(cells);
+    }
+    // 6 Diagonal planes (2 in XY across Z, 2 in XZ across Y, 2 in YZ across X)
+    const diag1 = [], diag2 = [], diag3 = [], diag4 = [], diag5 = [], diag6 = [];
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        diag1.push(idxOf(i, j, j));
+        diag2.push(idxOf(i, j, 2 - j));
+        diag3.push(idxOf(j, i, j));
+        diag4.push(idxOf(j, i, 2 - j));
+        diag5.push(idxOf(j, j, i));
+        diag6.push(idxOf(j, 2 - j, i));
+      }
+    }
+    planes.push(diag1, diag2, diag3, diag4, diag5, diag6);
+    return planes.map((cells) => {
+      let mask = 0;
+      for (const c of cells) mask |= (1 << c);
+      return mask;
+    });
+  }
+
+  const PLANE_MASKS_3D = buildPlanes3D();
+
+  // Precompute bitmasks for lines
+  function enrichLinesWithBitmasks(lines) {
+    return lines.map((ln) => {
+      const [a, b, c] = ln.cells;
+      return {
+        ...ln,
+        mask: (1 << a) | (1 << b) | (1 << c),
+        m0: 1 << a,
+        m1: 1 << b,
+        m2: 1 << c,
+        c0: a,
+        c1: b,
+        c2: c
+      };
+    });
+  }
+
+  const BIT_LINES_3D = enrichLinesWithBitmasks(ALL_3D_LINES);
+  const BIT_LINES_CLASSIC = enrichLinesWithBitmasks(CLASSIC_LINES);
+
+  function popcount32(x) {
+    x = x - ((x >>> 1) & 0x55555555);
+    x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+    return (((x + (x >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
+  }
+
   /* =========================================================================
-   * 3. SPATIAL AI & TACTICAL HINT ENGINE
+   * 3. GRANDMASTER SPATIAL AI (BITBOARD + VCF + ITERATIVE ALPHA-BETA SOLVER)
    * ========================================================================= */
   class SpatialAI {
+    static boardToMasks(board, player) {
+      let pMask = 0;
+      let oMask = 0;
+      for (let i = 0; i < 27; i++) {
+        if (board[i] === player) pMask |= (1 << i);
+        else if (board[i] !== null) oMask |= (1 << i);
+      }
+      return { pMask, oMask };
+    }
+
     static getValidMoves(board, gridMode) {
       const moves = [];
       for (let i = 0; i < 27; i++) {
@@ -246,74 +326,362 @@
 
     static findImmediateWins(board, player, lines) {
       const wins = [];
+      const seen = new Set();
       for (const ln of lines) {
         const [a, b, c] = ln.cells;
-        const vals = [board[a], board[b], board[c]];
-        const pCount = vals.filter((v) => v === player).length;
-        const emptyCount = vals.filter((v) => v === null).length;
-        if (pCount === 2 && emptyCount === 1) {
-          const target = ln.cells[vals.indexOf(null)];
-          wins.push({ cell: target, line: ln });
+        const va = board[a], vb = board[b], vc = board[c];
+        let pCount = 0;
+        let emptyIdx = -1;
+        if (va === player) pCount++; else if (va === null) emptyIdx = a;
+        if (vb === player) pCount++; else if (vb === null) emptyIdx = b;
+        if (vc === player) pCount++; else if (vc === null) emptyIdx = c;
+        if (pCount === 2 && emptyIdx !== -1 && !seen.has(emptyIdx)) {
+          seen.add(emptyIdx);
+          wins.push({ cell: emptyIdx, line: ln });
         }
       }
       return wins;
     }
 
-    static evaluateBoard(board, maxPlayer, minPlayer, lines, powerTable) {
-      let score = 0;
-      let maxThreats = 0;
-      let minThreats = 0;
+    // Fast Bitboard threat finder: returns bitmask of all cells that complete a 3-in-a-row for pMask
+    static getWinningMoveMask(pMask, oMask, bitLines) {
+      let winCellsMask = 0;
+      for (let i = 0; i < bitLines.length; i++) {
+        const ln = bitLines[i];
+        if ((oMask & ln.mask) !== 0) continue;
+        const pInLine = pMask & ln.mask;
+        if (pInLine === (ln.m0 | ln.m1)) winCellsMask |= ln.m2;
+        else if (pInLine === (ln.m0 | ln.m2)) winCellsMask |= ln.m1;
+        else if (pInLine === (ln.m1 | ln.m2)) winCellsMask |= ln.m0;
+      }
+      return winCellsMask;
+    }
 
-      for (const ln of lines) {
-        let maxCount = 0;
-        let minCount = 0;
-        for (const idx of ln.cells) {
-          if (board[idx] === maxPlayer) maxCount++;
-          else if (board[idx] === minPlayer) minCount++;
+    static hasWon(pMask, bitLines) {
+      for (let i = 0; i < bitLines.length; i++) {
+        const m = bitLines[i].mask;
+        if ((pMask & m) === m) return true;
+      }
+      return false;
+    }
+
+    /**
+     * VCF (Victory by Continuous Forcing) Solver:
+     * Searches forcing sequences where attacker plays a move that creates an immediate threat,
+     * forcing defender to block that exact cell, leading to a double-threat fork!
+     * Returns the winning first move index (0..26), or -1 if no forced sequence exists.
+     */
+    static searchVCF(pMask, oMask, bitLines, validCells, depthLeft) {
+      // 1. Can attacker win immediately on this turn?
+      const myWins = this.getWinningMoveMask(pMask, oMask, bitLines);
+      if (myWins !== 0) {
+        return 31 - Math.clz32(myWins & -myWins);
+      }
+      if (depthLeft <= 0) return -1;
+
+      // 2. Is attacker forced to block an opponent threat first?
+      const oppWins = this.getWinningMoveMask(oMask, pMask, bitLines);
+      const oppWinCount = popcount32(oppWins);
+      if (oppWinCount >= 2) return -1; // Defender already has an unstoppable fork
+
+      const occupied = pMask | oMask;
+
+      if (oppWinCount === 1) {
+        // Attacker MUST play the single blocking cell; only continue if that block is itself a forcing move
+        const forcedBlockBit = oppWins;
+        const forcedCell = 31 - Math.clz32(forcedBlockBit);
+        const nextPMask = pMask | forcedBlockBit;
+        const createdThreats = this.getWinningMoveMask(nextPMask, oMask, bitLines);
+        const threatCount = popcount32(createdThreats);
+        if (threatCount >= 2) return forcedCell;
+        if (threatCount === 1) {
+          const replyBit = createdThreats;
+          const nextOMask = oMask | replyBit;
+          // Ensure defender's forced reply doesn't simultaneously win for defender
+          if (!this.hasWon(nextOMask, bitLines)) {
+            const sub = this.searchVCF(nextPMask, nextOMask, bitLines, validCells, depthLeft - 1);
+            if (sub !== -1) return forcedCell;
+          }
         }
+        return -1;
+      }
 
-        if (maxCount > 0 && minCount > 0) continue; // blocked line
+      // 3. Attacker is free to choose any move that creates >= 1 immediate threat
+      // First pass: check if any single move immediately creates a double threat (fork) while not allowing opponent counter-win
+      for (let i = 0; i < validCells.length; i++) {
+        const cell = validCells[i];
+        const bit = 1 << cell;
+        if ((occupied & bit) !== 0) continue;
 
-        if (maxCount === 3) return 100000;
-        if (minCount === 3) return -100000;
+        const nextPMask = pMask | bit;
+        const threats = this.getWinningMoveMask(nextPMask, oMask, bitLines);
+        const tCount = popcount32(threats);
 
-        if (maxCount === 2) {
-          score += 180;
-          maxThreats++;
-        } else if (maxCount === 1) {
-          score += 18;
-        }
-
-        if (minCount === 2) {
-          score -= 195;
-          minThreats++;
-        } else if (minCount === 1) {
-          score -= 18;
+        if (tCount >= 2) {
+          return cell; // Unstoppable fork created!
         }
       }
 
-      // Double-threat (Fork) bonus
-      if (maxThreats >= 2) score += 650 * maxThreats;
-      if (minThreats >= 2) score -= 700 * minThreats;
+      // Second pass: explore single-threat forcing moves recursively
+      for (let i = 0; i < validCells.length; i++) {
+        const cell = validCells[i];
+        const bit = 1 << cell;
+        if ((occupied & bit) !== 0) continue;
 
-      // Positional synergy (center nexus = 13 lines, corners = 7 lines)
+        const nextPMask = pMask | bit;
+        const threats = this.getWinningMoveMask(nextPMask, oMask, bitLines);
+        if (popcount32(threats) === 1) {
+          const replyBit = threats;
+          const nextOMask = oMask | replyBit;
+          if (!this.hasWon(nextOMask, bitLines)) {
+            const res = this.searchVCF(nextPMask, nextOMask, bitLines, validCells, depthLeft - 1);
+            if (res !== -1) return cell;
+          }
+        }
+      }
+
+      return -1;
+    }
+
+    /**
+     * Rich Spatial Evaluation Function for Bitboards
+     */
+    static evaluateBitboard(pMask, oMask, bitLines, powerTable, is3D) {
+      let score = 0;
+      let pTwo = 0;
+      let oTwo = 0;
+      let pOne = 0;
+      let oOne = 0;
+
+      // Track potential fork intersections per empty cell
+      let pThreatMask = 0;
+      let pDoubleThreatMask = 0;
+      let oThreatMask = 0;
+      let oDoubleThreatMask = 0;
+
+      for (let i = 0; i < bitLines.length; i++) {
+        const ln = bitLines[i];
+        const pm = pMask & ln.mask;
+        const om = oMask & ln.mask;
+
+        if (pm !== 0 && om !== 0) continue; // Dead blocked line
+
+        if (pm !== 0) {
+          if (pm === ln.mask) return 100000;
+          const cnt = popcount32(pm);
+          if (cnt === 2) {
+            pTwo++;
+            score += 240;
+            const emptyBit = ln.mask ^ pm;
+            if ((pThreatMask & emptyBit) !== 0) pDoubleThreatMask |= emptyBit;
+            pThreatMask |= emptyBit;
+          } else {
+            pOne++;
+            score += 22;
+          }
+        } else if (om !== 0) {
+          if (om === ln.mask) return -100000;
+          const cnt = popcount32(om);
+          if (cnt === 2) {
+            oTwo++;
+            score -= 260;
+            const emptyBit = ln.mask ^ om;
+            if ((oThreatMask & emptyBit) !== 0) oDoubleThreatMask |= emptyBit;
+            oThreatMask |= emptyBit;
+          } else {
+            oOne++;
+            score -= 22;
+          }
+        }
+      }
+
+      // Unstoppable multi-cell fork bonus
+      const pDistinctThreats = popcount32(pThreatMask);
+      const oDistinctThreats = popcount32(oThreatMask);
+      if (pDistinctThreats >= 2) score += 1600 * pDistinctThreats;
+      if (oDistinctThreats >= 2) score -= 1800 * oDistinctThreats;
+
+      // Plane Dominance (Triangle Trap formation in 3x3x3)
+      if (is3D) {
+        for (let i = 0; i < PLANE_MASKS_3D.length; i++) {
+          const plMask = PLANE_MASKS_3D[i];
+          const pInPlane = popcount32(pMask & plMask);
+          const oInPlane = popcount32(oMask & plMask);
+          if (pInPlane >= 2 && oInPlane === 0) {
+            score += pInPlane === 3 ? 210 : 55;
+          } else if (oInPlane >= 2 && pInPlane === 0) {
+            score -= oInPlane === 3 ? 230 : 60;
+          }
+        }
+      }
+
+      // Positional cell weights (Center Nexus = 13, Corners = 7, etc.)
       for (let i = 0; i < 27; i++) {
-        if (board[i] === maxPlayer) score += powerTable[i] * 3;
-        else if (board[i] === minPlayer) score -= powerTable[i] * 3;
+        const bit = 1 << i;
+        if ((pMask & bit) !== 0) score += powerTable[i] * 5;
+        else if ((oMask & bit) !== 0) score -= powerTable[i] * 5;
       }
 
       return score;
     }
 
+    /**
+     * Order candidate moves for fastest Alpha-Beta cutoffs
+     */
+    static orderMoves(pMask, oMask, bitLines, powerTable, validCells) {
+      const occupied = pMask | oMask;
+      const myWins = this.getWinningMoveMask(pMask, oMask, bitLines);
+      const oppWins = this.getWinningMoveMask(oMask, pMask, bitLines);
+
+      const list = [];
+      for (let i = 0; i < validCells.length; i++) {
+        const cell = validCells[i];
+        const bit = 1 << cell;
+        if ((occupied & bit) !== 0) continue;
+
+        let priority = powerTable[cell] * 10;
+        if (cell === 13) priority += 200; // Center Nexus
+
+        if ((myWins & bit) !== 0) {
+          priority += 50000;
+        } else if ((oppWins & bit) !== 0) {
+          priority += 25000;
+        } else {
+          // Check how many threats placing here creates
+          const nextP = pMask | bit;
+          const created = popcount32(this.getWinningMoveMask(nextP, oMask, bitLines));
+          if (created >= 2) priority += 12000;
+          else if (created === 1) priority += 1400;
+
+          // Also check if opponent wanted this square to create a fork
+          const nextO = oMask | bit;
+          const oppCreated = popcount32(this.getWinningMoveMask(nextO, pMask, bitLines));
+          if (oppCreated >= 2) priority += 9000;
+          else if (oppCreated === 1) priority += 600;
+        }
+
+        list.push({ cell, priority });
+      }
+
+      list.sort((a, b) => b.priority - a.priority);
+      return list;
+    }
+
+    /**
+     * Negamax with Alpha-Beta Pruning + Transposition Table + Forced-Move & VCF Quiescence Extensions
+     */
+    static negamax(pMask, oMask, depth, alpha, beta, bitLines, powerTable, validCells, is3D, deadline, tt) {
+      // Immediate win check for side to move
+      const myWins = this.getWinningMoveMask(pMask, oMask, bitLines);
+      if (myWins !== 0) {
+        return 90000 + depth * 100;
+      }
+
+      const occupied = pMask | oMask;
+      const fullMask = is3D ? 0x7ffffff : 0x3fe00;
+      if ((occupied & fullMask) === fullMask) {
+        return 0; // Draw
+      }
+
+      // Check opponent's immediate threats
+      const oppWins = this.getWinningMoveMask(oMask, pMask, bitLines);
+      const oppWinCount = popcount32(oppWins);
+      if (oppWinCount >= 2) {
+        // Opponent has 2+ simultaneous winning moves; unstoppable loss next turn
+        return -(88000 + depth * 100);
+      }
+
+      // Forced block extension: if opponent has 1 threat, we MUST block it (branching factor = 1!)
+      if (oppWinCount === 1) {
+        const forcedBit = oppWins;
+        return -this.negamax(
+          oMask,
+          pMask | forcedBit,
+          depth, // Do not reduce depth on forced single-reply moves!
+          -beta,
+          -alpha,
+          bitLines,
+          powerTable,
+          validCells,
+          is3D,
+          deadline,
+          tt
+        );
+      }
+
+      // Transposition Table Lookup
+      const ttKey = pMask * 134217728 + oMask;
+      const cached = tt.get(ttKey);
+      if (cached !== undefined && cached.depth >= depth) {
+        if (cached.flag === 0) return cached.val;
+        if (cached.flag === 1 && cached.val > alpha) alpha = cached.val;
+        else if (cached.flag === 2 && cached.val < beta) beta = cached.val;
+        if (alpha >= beta) return cached.val;
+      }
+
+      if (depth <= 0 || Date.now() > deadline) {
+        // VCF Quiescence at leaf nodes: detect 2-step forced forks before static evaluation
+        if (is3D && Date.now() <= deadline) {
+          if (this.searchVCF(pMask, oMask, bitLines, validCells, 2) !== -1) {
+            return 82000;
+          }
+          if (this.searchVCF(oMask, pMask, bitLines, validCells, 2) !== -1) {
+            return -82000;
+          }
+        }
+        return this.evaluateBitboard(pMask, oMask, bitLines, powerTable, is3D);
+      }
+
+      const alphaOrig = alpha;
+      const ordered = this.orderMoves(pMask, oMask, bitLines, powerTable, validCells);
+      const maxBranch = is3D ? (depth >= 4 ? 10 : 12) : 9;
+      const limit = Math.min(ordered.length, maxBranch);
+
+      let bestVal = -Infinity;
+      for (let i = 0; i < limit; i++) {
+        const bit = 1 << ordered[i].cell;
+        const val = -this.negamax(
+          oMask,
+          pMask | bit,
+          depth - 1,
+          -beta,
+          -alpha,
+          bitLines,
+          powerTable,
+          validCells,
+          is3D,
+          deadline,
+          tt
+        );
+        if (val > bestVal) bestVal = val;
+        if (val > alpha) alpha = val;
+        if (alpha >= beta) break;
+      }
+
+      if (tt.size < 65000) {
+        const flag = bestVal <= alphaOrig ? 2 : bestVal >= beta ? 1 : 0;
+        tt.set(ttKey, { depth, val: bestVal, flag });
+      }
+
+      return bestVal;
+    }
+
     static analyzeBestMove(board, player, difficulty = 'hard', gridMode = '3d') {
-      const opponent = player === 'X' ? 'O' : 'X';
-      const lines = gridMode === '3d' ? ALL_3D_LINES : CLASSIC_LINES;
-      const powerTable = gridMode === '3d' ? POWER_3D : POWER_CLASSIC;
+      const is3D = gridMode === '3d';
+      const lines = is3D ? ALL_3D_LINES : CLASSIC_LINES;
+      const bitLines = is3D ? BIT_LINES_3D : BIT_LINES_CLASSIC;
+      const powerTable = is3D ? POWER_3D : POWER_CLASSIC;
       const validMoves = this.getValidMoves(board, gridMode);
 
       if (validMoves.length === 0) return null;
 
-      // 1. Check immediate winning move
+      const opponent = player === 'X' ? 'O' : 'X';
+      const { pMask, oMask } = this.boardToMasks(board, player);
+      const allValidCells = is3D
+        ? Array.from({ length: 27 }, (_, i) => i)
+        : [9, 10, 11, 12, 13, 14, 15, 16, 17];
+
+      // 1. Immediate Winning Move (1-ply victory)
       const ownWins = this.findImmediateWins(board, player, lines);
       if (ownWins.length > 0) {
         return {
@@ -322,96 +690,139 @@
         };
       }
 
-      // 2. Check immediate opponent threat to block (even Easy blocks 75% of the time)
+      // 2. Immediate Mandatory Block (opponent has 2-in-a-row)
       const oppWins = this.findImmediateWins(board, opponent, lines);
       if (oppWins.length > 0 && (difficulty !== 'easy' || Math.random() < 0.72)) {
         return {
           cell: oppWins[0].cell,
-          reason: `Critical block against opponent's ${oppWins[0].line.type}!`
+          reason: `Mandatory block against opponent's ${oppWins[0].line.type}!`
         };
       }
 
-      // Easy mode: mostly playful positional + random moves
+      // Easy Mode: playful semi-random choice
       if (difficulty === 'easy') {
-        const randomCell = validMoves[Math.floor(Math.random() * validMoves.length)];
+        const pick = validMoves[Math.floor(Math.random() * validMoves.length)];
         return {
-          cell: randomCell,
-          reason: `Open position intersecting ${powerTable[randomCell]} win lines.`
+          cell: pick,
+          reason: `Open position intersecting ${powerTable[pick]} win lines.`
         };
       }
 
-      // 3. Center Nexus priority if available on opening turns
-      const centerIdx = 13; // (1, 1, 1)
-      if (board[centerIdx] === null && (difficulty === 'hard' || Math.random() < 0.65)) {
+      // 3. Opening Book: Always claim the Center Nexus (1,1,1) if available!
+      const centerIdx = 13;
+      if (board[centerIdx] === null && (difficulty === 'hard' || Math.random() < 0.75)) {
         return {
           cell: centerIdx,
-          reason: gridMode === '3d'
-            ? 'Captures the Center Nexus (L2·R2·C2), controlling 13 winning lines!'
-            : 'Captures the center square, controlling 4 winning lines!'
+          reason: is3D
+            ? 'Claims the Center Nexus (L2·R2·C2), commanding 13 spatial winning lines!'
+            : 'Claims the center square, commanding 4 winning lines!'
         };
       }
 
-      // 4. Lookahead search (Depth 2 for Medium, Depth 3 with Alpha-Beta beam pruning for Hard)
-      const scoredMoves = validMoves.map((move) => {
-        board[move] = player;
-        const baseEval = this.evaluateBoard(board, player, opponent, lines, powerTable);
-        // Check if this move creates a fork (2+ simultaneous threats)
-        const createdThreats = this.findImmediateWins(board, player, lines).length;
-        board[move] = null;
-        return { move, baseEval, createdThreats };
-      });
-
-      scoredMoves.sort((a, b) => b.baseEval - a.baseEval);
-
-      if (difficulty === 'medium') {
-        const topSlice = scoredMoves.slice(0, Math.min(3, scoredMoves.length));
-        const pick = topSlice[Math.floor(Math.random() * topSlice.length)];
+      // 4. VCF (Victory by Continuous Forcing) Search for Attacker (up to 12 forcing half-plies!)
+      const vcfDepth = difficulty === 'hard' ? 6 : 2;
+      const vcfWinMove = this.searchVCF(pMask, oMask, bitLines, allValidCells, vcfDepth);
+      if (vcfWinMove !== -1 && board[vcfWinMove] === null) {
+        const nextP = pMask | (1 << vcfWinMove);
+        const immediateFork = popcount32(this.getWinningMoveMask(nextP, oMask, bitLines)) >= 2;
         return {
-          cell: pick.move,
-          reason: pick.createdThreats >= 2
-            ? `Creates a double-threat fork (${pick.createdThreats} simultaneous win lines)!`
-            : `Strong spatial control (${powerTable[pick.move]} intersecting lines).`
+          cell: vcfWinMove,
+          reason: immediateFork
+            ? 'Executes an unstoppable double-threat spatial fork!'
+            : 'Initiates a forced multi-turn winning threat sequence (VCF)!'
         };
       }
 
-      // Grandmaster (Hard): 2-ply adversarial minimax over top candidate moves
-      const candidates = scoredMoves.slice(0, Math.min(10, scoredMoves.length));
-      let bestMove = candidates[0].move;
-      let bestVal = -Infinity;
-      let bestMeta = candidates[0];
+      // 5. Iterative Deepening Negamax with Alpha-Beta + Transposition Table + Root Anti-VCF Filter
+      const deadline = Date.now() + (difficulty === 'hard' ? 220 : 50);
+      const maxSearchDepth = is3D ? (difficulty === 'hard' ? 6 : 3) : 9;
+      const rootCandidates = this.orderMoves(pMask, oMask, bitLines, powerTable, allValidCells);
+      const tt = new Map();
 
-      for (const cand of candidates) {
-        const m = cand.move;
-        board[m] = player;
-
-        // Simulate opponent's strongest response
-        const oppMoves = this.getValidMoves(board, gridMode);
-        let worstReply = Infinity;
-
-        for (const om of oppMoves) {
-          board[om] = opponent;
-          const val = this.evaluateBoard(board, player, opponent, lines, powerTable);
-          if (val < worstReply) worstReply = val;
-          board[om] = null;
-        }
-
-        const finalScore = oppMoves.length === 0 ? cand.baseEval : worstReply;
-        board[m] = null;
-
-        if (finalScore > bestVal) {
-          bestVal = finalScore;
-          bestMove = m;
-          bestMeta = cand;
+      // Pre-evaluate which root moves allow opponent an immediate VCF forced win
+      const vcfPenalty = new Map();
+      if (difficulty === 'hard' && is3D) {
+        for (let i = 0; i < rootCandidates.length; i++) {
+          const m = rootCandidates[i].cell;
+          const nextP = pMask | (1 << m);
+          const ourThreat = this.getWinningMoveMask(nextP, oMask, bitLines);
+          let allowsOppVCF = false;
+          if (ourThreat !== 0) {
+            const forcedReply = ourThreat & -ourThreat;
+            const nextO = oMask | forcedReply;
+            if (this.hasWon(nextO, bitLines) || this.searchVCF(nextO, nextP, bitLines, allValidCells, 5) !== -1) {
+              allowsOppVCF = true;
+            }
+          } else {
+            if (this.searchVCF(oMask, nextP, bitLines, allValidCells, 5) !== -1) {
+              allowsOppVCF = true;
+            }
+          }
+          vcfPenalty.set(m, allowsOppVCF ? -75000 : 0);
         }
       }
 
-      let reason = `Optimal strategic node (${powerTable[bestMove]} win lines).`;
-      if (bestMeta.createdThreats >= 2) {
-        reason = `Creates an unstoppable ${bestMeta.createdThreats}-way spatial fork!`;
-      } else if (bestMeta.createdThreats === 1) {
-        reason = `Forces opponent on the defensive while building ${powerTable[bestMove]}-line synergy.`;
+      let bestMove = rootCandidates[0].cell;
+      let bestScore = -Infinity;
+
+      for (let d = 2; d <= maxSearchDepth; d++) {
+        let currentBestMove = rootCandidates[0].cell;
+        let currentBestScore = -Infinity;
+        let alpha = -Infinity;
+        const beta = Infinity;
+
+        for (let i = 0; i < rootCandidates.length; i++) {
+          const cell = rootCandidates[i].cell;
+          const bit = 1 << cell;
+          const nextP = pMask | bit;
+
+          let score = -this.negamax(
+            oMask,
+            nextP,
+            d - 1,
+            -beta,
+            -alpha,
+            bitLines,
+            powerTable,
+            allValidCells,
+            is3D,
+            deadline,
+            tt
+          );
+
+          score += (vcfPenalty.get(cell) || 0);
+
+          if (score > currentBestScore) {
+            currentBestScore = score;
+            currentBestMove = cell;
+          }
+          if (score > alpha) alpha = score;
+        }
+
+        bestMove = currentBestMove;
+        bestScore = currentBestScore;
+
+        // Move PV (Principal Variation) best move to the front for next deeper iteration
+        const idx = rootCandidates.findIndex((c) => c.cell === bestMove);
+        if (idx > 0) {
+          const [picked] = rootCandidates.splice(idx, 1);
+          rootCandidates.unshift(picked);
+        }
+
+        if (Date.now() > deadline || bestScore >= 85000) break;
+      }
+
+      let reason = `Optimal minimax trajectory (${powerTable[bestMove]} intersecting lines).`;
+      if (bestScore >= 80000) {
+        reason = 'Calculates a forced multi-ply winning variation!';
       } else if (powerTable[bestMove] === 7) {
-        reason = `Secures a 3D Corner Vertex controlling 7 multi-planar lines.`;
+        reason = 'Secures a 3D Corner Vertex commanding 7 multi-planar lines.';
+      } else {
+        const nextP = pMask | (1 << bestMove);
+        const created = popcount32(this.getWinningMoveMask(nextP, oMask, bitLines));
+        if (created === 1) {
+          reason = `Builds forcing tempo while disrupting opponent planes (${powerTable[bestMove]} lines).`;
+        }
       }
 
       return { cell: bestMove, reason };
@@ -527,6 +938,7 @@
 
       // Game State
       this.board = new Array(27).fill(null);
+      this.startingPlayer = 'X';  // 'X' | 'O'
       this.currentTurn = 'X';
       this.gameMode = 'ai';       // 'ai' | 'pvp'
       this.aiDifficulty = 'hard'; // 'easy' | 'medium' | 'hard'
@@ -1132,12 +1544,20 @@
 
       const prevMove = this.moveHistory[this.moveHistory.length - 1];
       this.highlightLastMove(prevMove ? prevMove.cell : -1);
-      this.currentTurn = this.moveHistory.length % 2 === 0 ? 'X' : 'O';
+      if (this.moveHistory.length === 0) {
+        this.currentTurn = this.gameMode === 'ai' ? this.startingPlayer : 'X';
+      } else {
+        this.currentTurn = prevMove.player === 'X' ? 'O' : 'X';
+      }
 
       this.sound.playUndo();
       this.updateTurnUI();
       this.updateMoveLogUI();
       this.updateTelemetry(null);
+
+      if (this.gameMode === 'ai' && this.currentTurn === 'O') {
+        this.triggerAIMove();
+      }
     }
 
     requestHint() {
@@ -1174,7 +1594,7 @@
     resetGame() {
       clearTimeout(this.aiTimer);
       this.board.fill(null);
-      this.currentTurn = 'X';
+      this.currentTurn = this.gameMode === 'ai' ? this.startingPlayer : 'X';
       this.gameOver = false;
       this.winningLine = null;
       this.moveHistory = [];
@@ -1192,6 +1612,10 @@
       this.updateTurnUI();
       this.updateMoveLogUI();
       this.updateTelemetry(null);
+
+      if (this.gameMode === 'ai' && this.currentTurn === 'O') {
+        this.triggerAIMove();
+      }
     }
 
     /* ---------------------------------------------------------------------
@@ -1430,15 +1854,26 @@
             b.classList.toggle('active', b === btn);
           });
           document.getElementById('ai-difficulty-group').classList.toggle('hidden', this.gameMode !== 'ai');
+          document.getElementById('first-turn-group').classList.toggle('hidden', this.gameMode !== 'ai');
           this.resetGame();
         });
       });
 
-      // 8. AI Difficulty
+      // 8. AI Difficulty & Opening Turn
       document.querySelectorAll('[data-diff]').forEach((btn) => {
         btn.addEventListener('click', () => {
           this.aiDifficulty = btn.dataset.diff;
           document.querySelectorAll('[data-diff]').forEach((b) => {
+            b.classList.toggle('active', b === btn);
+          });
+          this.resetGame();
+        });
+      });
+
+      document.querySelectorAll('[data-first]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          this.startingPlayer = btn.dataset.first;
+          document.querySelectorAll('[data-first]').forEach((b) => {
             b.classList.toggle('active', b === btn);
           });
           this.resetGame();
