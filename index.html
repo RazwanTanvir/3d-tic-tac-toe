@@ -115,8 +115,17 @@
           <div class="sub-control">
             <label class="control-label">Grid Dimension</label>
             <div class="segmented-control compact" role="radiogroup" aria-label="Grid Dimension">
-              <button class="seg-btn active" data-grid="3d" id="grid-3d">3×3×3 Cube (49 Lines)</button>
+              <button class="seg-btn active" data-grid="3d" id="grid-3d">3×3×3 Cube</button>
               <button class="seg-btn" data-grid="classic" id="grid-classic">3×3 Classic</button>
+            </div>
+          </div>
+
+          <div class="sub-control" id="center-rule-group">
+            <label class="control-label">Center Nexus Rule</label>
+            <div class="segmented-control compact" role="radiogroup" aria-label="Center Nexus Rule">
+              <button class="seg-btn" data-center="standard" title="Center (L2·R2·C2) is open from Move 1 (49 lines)">Standard</button>
+              <button class="seg-btn active" data-center="turn1" title="Center (L2·R2·C2) is locked on Move 1, unlocks on Move 2 (49 lines)">Turn-1 Lock</button>
+              <button class="seg-btn" data-center="void" title="Center (L2·R2·C2) is permanently blocked for the entire match (36 lines)">Void Core</button>
             </div>
           </div>
         </div>

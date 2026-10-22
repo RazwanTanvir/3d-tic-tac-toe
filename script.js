@@ -215,6 +215,7 @@
   }
 
   const ALL_3D_LINES = buildWinLines(); // 49 lines
+  const VOID_3D_LINES = ALL_3D_LINES.filter((ln) => !ln.cells.includes(13)); // 36 lines (Void Core mode)
   const CLASSIC_LINES = ALL_3D_LINES.filter((ln) => ln.layer === 1); // 8 lines on middle layer
 
   // Precompute how many winning lines intersect each cell
@@ -229,6 +230,7 @@
   }
 
   const POWER_3D = computeCellPower(ALL_3D_LINES);
+  const POWER_VOID_3D = computeCellPower(VOID_3D_LINES);
   const POWER_CLASSIC = computeCellPower(CLASSIC_LINES);
 
   // Precompute all 15 planes of the 3x3x3 cube (each plane has 9 cells and 8 win lines)
@@ -293,11 +295,12 @@
   }
 
   const BIT_LINES_3D = enrichLinesWithBitmasks(ALL_3D_LINES);
+  const BIT_LINES_VOID_3D = enrichLinesWithBitmasks(VOID_3D_LINES);
   const BIT_LINES_CLASSIC = enrichLinesWithBitmasks(CLASSIC_LINES);
 
   function popcount32(x) {
     x = x - ((x >>> 1) & 0x55555555);
-    x = (x & 0x33333333) + ((x >>> 2) & 0x33333333);
+    x = (x & x & 0x33333333) + ((x >>> 2) & 0x33333333);
     return (((x + (x >>> 4)) & 0x0f0f0f0f) * 0x01010101) >>> 24;
   }
 
@@ -306,19 +309,24 @@
    * ========================================================================= */
   class SpatialAI {
     static boardToMasks(board, player) {
+      const opponent = player === 'X' ? 'O' : 'X';
       let pMask = 0;
       let oMask = 0;
       for (let i = 0; i < 27; i++) {
         if (board[i] === player) pMask |= (1 << i);
-        else if (board[i] !== null) oMask |= (1 << i);
+        else if (board[i] === opponent) oMask |= (1 << i);
       }
       return { pMask, oMask };
     }
 
-    static getValidMoves(board, gridMode) {
+    static getValidMoves(board, gridMode, centerRule = 'standard', moveCount = 0) {
       const moves = [];
       for (let i = 0; i < 27; i++) {
         if (gridMode === 'classic' && Math.floor(i / 9) !== 1) continue;
+        if (gridMode === '3d' && i === 13) {
+          if (centerRule === 'void') continue;
+          if (centerRule === 'turn1' && moveCount === 0) continue;
+        }
         if (board[i] === null) moves.push(i);
       }
       return moves;
@@ -570,7 +578,7 @@
     /**
      * Negamax with Alpha-Beta Pruning + Transposition Table + Forced-Move & VCF Quiescence Extensions
      */
-    static negamax(pMask, oMask, depth, alpha, beta, bitLines, powerTable, validCells, is3D, deadline, tt) {
+    static negamax(pMask, oMask, depth, alpha, beta, bitLines, powerTable, validCells, is3D, fullMask, deadline, tt) {
       // Immediate win check for side to move
       const myWins = this.getWinningMoveMask(pMask, oMask, bitLines);
       if (myWins !== 0) {
@@ -578,7 +586,6 @@
       }
 
       const occupied = pMask | oMask;
-      const fullMask = is3D ? 0x7ffffff : 0x3fe00;
       if ((occupied & fullMask) === fullMask) {
         return 0; // Draw
       }
@@ -604,6 +611,7 @@
           powerTable,
           validCells,
           is3D,
+          fullMask,
           deadline,
           tt
         );
@@ -650,6 +658,7 @@
           powerTable,
           validCells,
           is3D,
+          fullMask,
           deadline,
           tt
         );
@@ -666,20 +675,27 @@
       return bestVal;
     }
 
-    static analyzeBestMove(board, player, difficulty = 'hard', gridMode = '3d') {
+    static analyzeBestMove(board, player, difficulty = 'hard', gridMode = '3d', centerRule = 'standard', moveCount = 0) {
       const is3D = gridMode === '3d';
-      const lines = is3D ? ALL_3D_LINES : CLASSIC_LINES;
-      const bitLines = is3D ? BIT_LINES_3D : BIT_LINES_CLASSIC;
-      const powerTable = is3D ? POWER_3D : POWER_CLASSIC;
-      const validMoves = this.getValidMoves(board, gridMode);
+      const isVoid = is3D && centerRule === 'void';
+      const isTurn1Locked = is3D && centerRule === 'turn1' && moveCount === 0;
+
+      const lines = !is3D ? CLASSIC_LINES : isVoid ? VOID_3D_LINES : ALL_3D_LINES;
+      const bitLines = !is3D ? BIT_LINES_CLASSIC : isVoid ? BIT_LINES_VOID_3D : BIT_LINES_3D;
+      const powerTable = !is3D ? POWER_CLASSIC : isVoid ? POWER_VOID_3D : POWER_3D;
+      const validMoves = this.getValidMoves(board, gridMode, centerRule, moveCount);
 
       if (validMoves.length === 0) return null;
 
       const opponent = player === 'X' ? 'O' : 'X';
       const { pMask, oMask } = this.boardToMasks(board, player);
-      const allValidCells = is3D
-        ? Array.from({ length: 27 }, (_, i) => i)
-        : [9, 10, 11, 12, 13, 14, 15, 16, 17];
+      const allValidCells = !is3D
+        ? [9, 10, 11, 12, 13, 14, 15, 16, 17]
+        : isVoid
+          ? Array.from({ length: 27 }, (_, i) => i).filter((i) => i !== 13)
+          : Array.from({ length: 27 }, (_, i) => i);
+
+      const fullMask = !is3D ? 0x3fe00 : isVoid ? (0x7ffffff ^ (1 << 13)) : 0x7ffffff;
 
       // 1. Immediate Winning Move (1-ply victory)
       const ownWins = this.findImmediateWins(board, player, lines);
@@ -708,21 +724,31 @@
         };
       }
 
-      // 3. Opening Book: Always claim the Center Nexus (1,1,1) if available!
+      // 3. Opening Book: Claim Center Nexus (1,1,1) if unlocked and available!
       const centerIdx = 13;
-      if (board[centerIdx] === null && (difficulty === 'hard' || Math.random() < 0.75)) {
+      if (!isVoid && !isTurn1Locked && board[centerIdx] === null && (difficulty === 'hard' || Math.random() < 0.75)) {
         return {
           cell: centerIdx,
           reason: is3D
-            ? 'Claims the Center Nexus (L2·R2·C2), commanding 13 spatial winning lines!'
+            ? 'Claims the unlocked Center Nexus (L2·R2·C2), commanding 13 spatial winning lines!'
             : 'Claims the center square, commanding 4 winning lines!'
+        };
+      }
+
+      // If Move 1 has Center Locked (or Void Core on Move 1), open on one of the 8 symmetric 3D corners
+      if (is3D && moveCount === 0 && (isTurn1Locked || isVoid)) {
+        const corners = [0, 2, 6, 8, 18, 20, 24, 26];
+        const pick = corners[Math.floor(Math.random() * corners.length)];
+        return {
+          cell: pick,
+          reason: `Opens on a 3D Corner Vertex (${powerTable[pick]} lines) while the Center Nexus is locked.`
         };
       }
 
       // 4. VCF (Victory by Continuous Forcing) Search for Attacker (up to 12 forcing half-plies!)
       const vcfDepth = difficulty === 'hard' ? 6 : 2;
       const vcfWinMove = this.searchVCF(pMask, oMask, bitLines, allValidCells, vcfDepth);
-      if (vcfWinMove !== -1 && board[vcfWinMove] === null) {
+      if (vcfWinMove !== -1 && board[vcfWinMove] === null && !(isTurn1Locked && vcfWinMove === 13)) {
         const nextP = pMask | (1 << vcfWinMove);
         const immediateFork = popcount32(this.getWinningMoveMask(nextP, oMask, bitLines)) >= 2;
         return {
@@ -736,7 +762,8 @@
       // 5. Iterative Deepening Negamax with Alpha-Beta + Transposition Table + Root Anti-VCF Filter
       const deadline = Date.now() + (difficulty === 'hard' ? 220 : 50);
       const maxSearchDepth = is3D ? (difficulty === 'hard' ? 6 : 3) : 9;
-      const rootCandidates = this.orderMoves(pMask, oMask, bitLines, powerTable, allValidCells);
+      const rootAllowedCells = isTurn1Locked ? allValidCells.filter((i) => i !== 13) : allValidCells;
+      const rootCandidates = this.orderMoves(pMask, oMask, bitLines, powerTable, rootAllowedCells);
       const tt = new Map();
 
       // Pre-evaluate which root moves allow opponent an immediate VCF forced win
@@ -786,6 +813,7 @@
             powerTable,
             allValidCells,
             is3D,
+            fullMask,
             deadline,
             tt
           );
@@ -815,8 +843,8 @@
       let reason = `Optimal minimax trajectory (${powerTable[bestMove]} intersecting lines).`;
       if (bestScore >= 80000) {
         reason = 'Calculates a forced multi-ply winning variation!';
-      } else if (powerTable[bestMove] === 7) {
-        reason = 'Secures a 3D Corner Vertex commanding 7 multi-planar lines.';
+      } else if (powerTable[bestMove] >= 6) {
+        reason = `Secures a 3D Corner Vertex commanding ${powerTable[bestMove]} multi-planar lines.`;
       } else {
         const nextP = pMask | (1 << bestMove);
         const created = popcount32(this.getWinningMoveMask(nextP, oMask, bitLines));
@@ -943,6 +971,7 @@
       this.gameMode = 'ai';       // 'ai' | 'pvp'
       this.aiDifficulty = 'hard'; // 'easy' | 'medium' | 'hard'
       this.gridMode = '3d';       // '3d' | 'classic'
+      this.centerRule = 'turn1';  // 'standard' | 'turn1' | 'void'
       this.gameOver = false;
       this.winningLine = null;
       this.moveHistory = [];      // [{ cell, player, moveNum }]
@@ -976,8 +1005,25 @@
       this.bindEvents();
       this.updateCameraCSS(false);
       this.updateScoreboardUI();
-      this.updateTelemetry(null);
+      this.resetGame();
       this.startAutoRotateLoop();
+    }
+
+    getActiveLines() {
+      if (this.gridMode === 'classic') return CLASSIC_LINES;
+      return this.centerRule === 'void' ? VOID_3D_LINES : ALL_3D_LINES;
+    }
+
+    getPowerTable() {
+      if (this.gridMode === 'classic') return POWER_CLASSIC;
+      return this.centerRule === 'void' ? POWER_VOID_3D : POWER_3D;
+    }
+
+    isCenterRestrictedNow(idx) {
+      if (idx !== 13 || this.gridMode !== '3d') return false;
+      if (this.centerRule === 'void') return true;
+      if (this.centerRule === 'turn1' && this.moveHistory.length === 0) return true;
+      return false;
     }
 
     loadScores() {
@@ -1252,12 +1298,12 @@
       this.cell3dEls[idx].classList.add('synced-hover');
       this.sliceCellEls[idx].classList.add('synced-hover');
 
-      if (!this.gameOver && this.board[idx] === null && !this.isAITurn()) {
+      if (!this.gameOver && this.board[idx] === null && !this.isAITurn() && !this.isCenterRestrictedNow(idx)) {
         if (from3D) this.sound.playHover(l);
         this.showGhostPreview(idx, this.currentTurn);
       }
 
-      if (this.xrayEnabled && !this.gameOver) {
+      if (this.xrayEnabled && !this.gameOver && !this.isCenterRestrictedNow(idx)) {
         this.highlightIntersectingLines(idx);
       }
 
@@ -1273,20 +1319,20 @@
     }
 
     showGhostPreview(idx, player) {
-      if (this.board[idx] !== null) return;
+      if (this.board[idx] !== null || this.isCenterRestrictedNow(idx)) return;
       const anchor = this.cell3dEls[idx].querySelector('.piece-anchor');
       anchor.innerHTML = this.createPieceMarkup(player, true);
     }
 
     clearGhostPreview(idx) {
-      if (this.board[idx] !== null) return;
+      if (this.board[idx] !== null || (idx === 13 && this.gridMode === '3d' && this.centerRule === 'void')) return;
       const anchor = this.cell3dEls[idx].querySelector('.piece-anchor');
       anchor.innerHTML = '';
     }
 
     highlightIntersectingLines(idx) {
       this.clearRadarHighlights();
-      const lines = this.gridMode === '3d' ? ALL_3D_LINES : CLASSIC_LINES;
+      const lines = this.getActiveLines();
 
       for (const ln of lines) {
         if (!ln.cells.includes(idx)) continue;
@@ -1295,7 +1341,7 @@
         const hasO = vals.includes('O');
         if (hasX && hasO) continue; // blocked line
 
-        const filledCount = vals.filter((v) => v !== null).length;
+        const filledCount = vals.filter((v) => v === 'X' || v === 'O').length;
         const isCritical = filledCount === 2 && this.board[idx] === null;
 
         for (const cIdx of ln.cells) {
@@ -1324,6 +1370,13 @@
       if (this.isAITurn()) return;
       if (this.board[idx] !== null) return;
       if (this.gridMode === 'classic' && Math.floor(idx / 9) !== 1) return;
+      if (this.isCenterRestrictedNow(idx)) {
+        this.sound.playDraw();
+        this.statusTextEl.textContent = this.centerRule === 'turn1'
+          ? 'Center Nexus (L2·R2·C2) is locked on Move 1 — Open on an outer cell!'
+          : 'Void Core (L2·R2·C2) is permanently impassable in this mode!';
+        return;
+      }
 
       this.executeMove(idx, this.currentTurn);
 
@@ -1348,11 +1401,15 @@
 
       // Render 3D Piece & 2D Slice Mark
       this.renderCellState(idx);
+      // If Turn-1 Lock was active and Move 1 just completed, unlock Center Nexus visual!
+      if (this.gridMode === '3d' && this.centerRule === 'turn1' && this.moveHistory.length === 1) {
+        this.renderCellState(13);
+      }
       this.highlightLastMove(idx);
       this.updateMoveLogUI();
 
       // Check for Win or Draw
-      const lines = this.gridMode === '3d' ? ALL_3D_LINES : CLASSIC_LINES;
+      const lines = this.getActiveLines();
       const winMatch = this.checkWin(lines);
 
       if (winMatch) {
@@ -1360,7 +1417,7 @@
         return;
       }
 
-      const maxMoves = this.gridMode === '3d' ? 27 : 9;
+      const maxMoves = this.gridMode === 'classic' ? 9 : (this.centerRule === 'void' ? 26 : 27);
       if (this.moveHistory.length >= maxMoves) {
         this.finishGameWithDraw();
         return;
@@ -1385,10 +1442,39 @@
 
     renderCellState(idx) {
       const val = this.board[idx];
-      const anchor = this.cell3dEls[idx].querySelector('.piece-anchor');
+      const cellEl = this.cell3dEls[idx];
+      const anchor = cellEl.querySelector('.piece-anchor');
+      const padCoord = cellEl.querySelector('.pad-coord');
       const sliceBtn = this.sliceCellEls[idx];
 
-      sliceBtn.classList.remove('x', 'o');
+      sliceBtn.classList.remove('x', 'o', 'locked-nexus', 'void-nexus');
+      cellEl.classList.remove('locked-nexus', 'void-nexus');
+
+      if (idx === 13 && this.gridMode === '3d' && val === null) {
+        if (this.centerRule === 'void') {
+          cellEl.classList.add('void-nexus');
+          sliceBtn.classList.add('void-nexus');
+          sliceBtn.textContent = '❖';
+          if (padCoord) padCoord.textContent = 'VOID';
+          anchor.innerHTML = `
+            <div class="piece-base-halo void"></div>
+            <div class="piece-billboard">
+              <div class="holo-void"></div>
+            </div>
+          `;
+          return;
+        }
+        if (this.centerRule === 'turn1' && this.moveHistory.length === 0) {
+          cellEl.classList.add('locked-nexus');
+          sliceBtn.classList.add('locked-nexus');
+          sliceBtn.textContent = '🔒';
+          if (padCoord) padCoord.textContent = 'LOCK';
+          anchor.innerHTML = '';
+          return;
+        }
+        if (padCoord) padCoord.textContent = '★';
+      }
+
       if (val === null) {
         anchor.innerHTML = '';
         sliceBtn.textContent = '';
@@ -1504,12 +1590,14 @@
           this.board,
           'O',
           this.aiDifficulty,
-          this.gridMode
+          this.gridMode,
+          this.centerRule,
+          this.moveHistory.length
         );
         if (decision && decision.cell !== undefined) {
           this.executeMove(decision.cell, 'O');
         }
-      }, 420);
+      }, 360);
     }
 
     undoMove() {
@@ -1531,6 +1619,9 @@
         this.board[last.cell] = null;
         this.renderCellState(last.cell);
       }
+
+      // Refresh Center Nexus lock state if we undid back to Move 0
+      this.renderCellState(13);
 
       this.gameOver = false;
       this.winningLine = null;
@@ -1568,7 +1659,9 @@
         this.board,
         this.currentTurn,
         'hard',
-        this.gridMode
+        this.gridMode,
+        this.centerRule,
+        this.moveHistory.length
       );
 
       if (!recommendation) return;
@@ -1612,6 +1705,16 @@
       this.updateTurnUI();
       this.updateMoveLogUI();
       this.updateTelemetry(null);
+
+      if (this.gridMode === '3d') {
+        if (this.centerRule === 'turn1') {
+          this.tacticalNote.innerHTML = `Rule Active: <strong>Turn-1 Lock</strong> — Center Nexus <strong>(L2·R2·C2)</strong> is locked on Move 1, then unlocks on Move 2!`;
+        } else if (this.centerRule === 'void') {
+          this.tacticalNote.innerHTML = `Rule Active: <strong>Void Core</strong> — Center Nexus is permanently impassable (36 perimeter winning lines).`;
+        } else {
+          this.tacticalNote.innerHTML = `Pro Tip: The center cell <strong>(L2·R2·C2)</strong> intersects <strong>13 winning lines</strong>—more than any other position in the cube.`;
+        }
+      }
 
       if (this.gameMode === 'ai' && this.currentTurn === 'O') {
         this.triggerAIMove();
@@ -1660,7 +1763,7 @@
     }
 
     updateMoveLogUI() {
-      const maxMoves = this.gridMode === '3d' ? 27 : 9;
+      const maxMoves = this.gridMode === 'classic' ? 9 : (this.centerRule === 'void' ? 26 : 27);
       this.moveCounterEl.textContent = `${this.moveHistory.length} / ${maxMoves}`;
 
       if (this.moveHistory.length === 0) {
@@ -1684,8 +1787,8 @@
     }
 
     updateTelemetry(hoveredIdx = null) {
-      const lines = this.gridMode === '3d' ? ALL_3D_LINES : CLASSIC_LINES;
-      const powerTable = this.gridMode === '3d' ? POWER_3D : POWER_CLASSIC;
+      const lines = this.getActiveLines();
+      const powerTable = this.getPowerTable();
 
       // Count open unblocked winning lines
       let activeLines = 0;
@@ -1696,7 +1799,11 @@
       this.telTotalLines.textContent = `${activeLines} / ${lines.length}`;
 
       if (hoveredIdx !== null) {
-        this.telCellPower.textContent = `${powerTable[hoveredIdx]} intersecting lines`;
+        if (this.isCenterRestrictedNow(hoveredIdx)) {
+          this.telCellPower.textContent = this.centerRule === 'void' ? 'Void Core (Blocked)' : 'Locked on Move 1';
+        } else {
+          this.telCellPower.textContent = `${powerTable[hoveredIdx]} intersecting lines`;
+        }
       } else {
         this.telCellPower.textContent = 'Hover a cell';
       }
@@ -1880,7 +1987,7 @@
         });
       });
 
-      // 9. Grid Dimension (3x3x3 Cube vs 3x3 Classic)
+      // 9. Grid Dimension (3x3x3 Cube vs 3x3 Classic) & Center Nexus Rule
       document.querySelectorAll('[data-grid]').forEach((btn) => {
         btn.addEventListener('click', () => {
           this.gridMode = btn.dataset.grid;
@@ -1888,6 +1995,7 @@
             b.classList.toggle('active', b === btn);
           });
           const isClassic = this.gridMode === 'classic';
+          document.getElementById('center-rule-group').classList.toggle('hidden', isClassic);
           document.getElementById('explode-slider-group').classList.toggle('hidden', isClassic);
           document.getElementById('layer-filter-group').classList.toggle('hidden', isClassic);
 
@@ -1896,6 +2004,16 @@
 
           this.isolatedLayer = 'all';
           this.updateSpatialPositions();
+          this.resetGame();
+        });
+      });
+
+      document.querySelectorAll('[data-center]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          this.centerRule = btn.dataset.center;
+          document.querySelectorAll('[data-center]').forEach((b) => {
+            b.classList.toggle('active', b === btn);
+          });
           this.resetGame();
         });
       });

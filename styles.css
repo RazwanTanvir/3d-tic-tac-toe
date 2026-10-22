@@ -1149,6 +1149,55 @@ body.turn-o .cell-3d.synced-hover .cell-pad {
     inset 0 0 10px rgba(255, 255, 255, 0.65);
 }
 
+/* VOID CORE REACTOR SCULPTURE & TURN-1 LOCK */
+.piece-base-halo.void {
+  border: 2px solid rgba(168, 85, 247, 0.55);
+  background: radial-gradient(circle, rgba(168, 85, 247, 0.3) 0%, transparent 72%);
+  box-shadow: 0 0 20px rgba(168, 85, 247, 0.45);
+}
+
+.holo-void {
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  transform: rotate(45deg);
+  border: 3px solid #c084fc;
+  background: radial-gradient(circle, rgba(192, 132, 252, 0.55) 0%, rgba(88, 28, 135, 0.85) 100%);
+  box-shadow:
+    0 0 16px rgba(168, 85, 247, 0.8),
+    inset 0 0 10px rgba(255, 255, 255, 0.65);
+}
+
+.cell-3d.locked-nexus .cell-pad {
+  border-color: rgba(251, 191, 36, 0.55);
+  border-style: dashed;
+  background: rgba(251, 191, 36, 0.1);
+  cursor: not-allowed;
+}
+
+.cell-3d.void-nexus .cell-pad {
+  border-color: rgba(168, 85, 247, 0.55);
+  background: rgba(88, 28, 135, 0.28);
+  cursor: not-allowed;
+}
+
+.slice-cell.locked-nexus {
+  border-color: rgba(251, 191, 36, 0.6);
+  border-style: dashed;
+  background: rgba(251, 191, 36, 0.12);
+  color: var(--accent-gold);
+  font-size: 0.72rem;
+  cursor: not-allowed;
+}
+
+.slice-cell.void-nexus {
+  border-color: rgba(168, 85, 247, 0.6);
+  background: rgba(88, 28, 135, 0.32);
+  color: #d8b4fe;
+  font-size: 0.82rem;
+  cursor: not-allowed;
+}
+
 /* Ghost Hover Preview Piece */
 .ghost-preview {
   opacity: 0.42;
